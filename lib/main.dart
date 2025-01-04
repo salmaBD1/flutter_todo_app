@@ -1,19 +1,54 @@
 import 'package:flutter/material.dart';
 import 'dart:math';
+import 'package:firebase_core/firebase_core.dart';
+import 'firebase_options.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 
 class ToDo {
   final String id;
   String title;
   bool isCompleted;
+  DateTime? reminderTime;
+  String category;
 
   ToDo({
     required this.id,
     required this.title,
     this.isCompleted = false,
+    this.reminderTime,
+    required this.category,
   });
+// transform the class into map for storing in Firestore
+  Map<String, dynamic> toMap() {
+    return {
+      'id': id,
+      'title': title,
+      'isCompleted': isCompleted,
+      'reminderTime': reminderTime?.toIso8601String(),
+      'category': category,
+    };
+  }
+
+  //converts Firestore data into a ToDo object
+  factory ToDo.fromDocument(DocumentSnapshot doc) {
+    final data = doc.data() as Map<String, dynamic>;
+    return ToDo(
+      id: data['id'],
+      title: data['title'],
+      isCompleted: data['isCompleted'],
+      reminderTime: data['reminderTime'] != null
+          ? DateTime.parse(data['reminderTime'])
+          : null,
+      category: data['category'] ?? 'Work',
+    );
+  }
 }
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp(
+    options: DefaultFirebaseOptions.currentPlatform,
+  );
   runApp(const MyApp());
 }
 
@@ -23,16 +58,22 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Colorful To-Do List',
+      title: 'Cutesy To-Do List',
       theme: ThemeData(
-        primarySwatch: Colors.purple,
+        primarySwatch: Colors.pink,
+        textTheme: TextTheme(
+          bodyLarge: TextStyle(fontFamily: 'Poppins', fontSize: 16),
+          bodyMedium: TextStyle(fontFamily: 'Poppins', fontSize: 14),
+        ),
       ),
-      home: ToDoListScreen(),
+      home: const ToDoListScreen(),
     );
   }
 }
 
 class ToDoListScreen extends StatefulWidget {
+  const ToDoListScreen({super.key});
+
   @override
   _ToDoListScreenState createState() => _ToDoListScreenState();
 }
@@ -43,28 +84,89 @@ class _ToDoListScreenState extends State<ToDoListScreen> {
   final TextEditingController addController = TextEditingController();
   final TextEditingController editController = TextEditingController();
   List<ToDo> filteredList = [];
+  DateTime? reminderTime;
+  String selectedCategory = 'Work';
 
   @override
   void initState() {
     super.initState();
-    filteredList = toDoList;
+    fetchToDos();
   }
 
-  void addToDo(String title) {
-    setState(() {
-      toDoList.add(ToDo(
-        id: Random().nextInt(1000).toString(),
-        title: title,
-      ));
-      filteredList = List.from(toDoList);
-    });
+  Future<void> fetchToDos() async {
+    try {
+      final snapshot =
+          await FirebaseFirestore.instance.collection('todos').get();
+      final todos = snapshot.docs.map((doc) => ToDo.fromDocument(doc)).toList();
+      setState(() {
+        toDoList.addAll(todos);
+        filteredList = List.from(toDoList);
+      });
+    } catch (e) {
+      print('Error fetching ToDos: $e');
+    }
   }
 
-  void deleteToDo(String id) {
-    setState(() {
-      toDoList.removeWhere((todo) => todo.id == id);
-      filteredList = List.from(toDoList);
-    });
+  void addToDo(String title, DateTime? reminderTime, String category) async {
+    final newToDo = ToDo(
+      id: Random().nextInt(1000).toString(),
+      title: title,
+      reminderTime: reminderTime,
+      category: category,
+    );
+
+    try {
+      await FirebaseFirestore.instance.collection('todos').add(newToDo.toMap());
+      setState(() {
+        toDoList.add(newToDo);
+        filteredList = List.from(toDoList);
+      });
+    } catch (e) {
+      print('Error adding ToDo: $e');
+    }
+  }
+
+  void editToDoInFirestore(ToDo todo) async {
+    try {
+      final query = await FirebaseFirestore.instance
+          .collection('todos')
+          .where('id', isEqualTo: todo.id)
+          .get();
+      if (query.docs.isNotEmpty) {
+        final docId = query.docs.first.id;
+        await FirebaseFirestore.instance
+            .collection('todos')
+            .doc(docId)
+            .update({'title': todo.title, 'category': todo.category});
+        setState(() {
+          filteredList = List.from(toDoList);
+        });
+      }
+    } catch (e) {
+      print('Error editing ToDo: $e');
+    }
+  }
+
+  void deleteToDoInFirestore(String id) async {
+    try {
+      final query = await FirebaseFirestore.instance
+          .collection('todos')
+          .where('id', isEqualTo: id)
+          .get();
+      if (query.docs.isNotEmpty) {
+        final docId = query.docs.first.id;
+        await FirebaseFirestore.instance
+            .collection('todos')
+            .doc(docId)
+            .delete();
+        setState(() {
+          toDoList.removeWhere((todo) => todo.id == id);
+          filteredList = List.from(toDoList);
+        });
+      }
+    } catch (e) {
+      print('Error deleting ToDo: $e');
+    }
   }
 
   void toggleTaskCompletion(String id) {
@@ -88,26 +190,49 @@ class _ToDoListScreenState extends State<ToDoListScreen> {
     });
   }
 
-  void editToDo(ToDo todo) {
-    setState(() {
-      todo.title = editController.text;
-      filteredList = List.from(toDoList);
-    });
+  Future<void> selectReminderTime(BuildContext context) async {
+    final DateTime? picked = await showDatePicker(
+      context: context,
+      initialDate: reminderTime ?? DateTime.now(),
+      firstDate: DateTime(2000),
+      lastDate: DateTime(2101),
+    );
+    if (picked != null && picked != reminderTime) {
+      final TimeOfDay? time = await showTimePicker(
+        context: context,
+        initialTime: TimeOfDay.fromDateTime(reminderTime ?? DateTime.now()),
+      );
+      if (time != null) {
+        final selectedDate = DateTime(
+          picked.year,
+          picked.month,
+          picked.day,
+          time.hour,
+          time.minute,
+        );
+        setState(() {
+          reminderTime = selectedDate;
+        });
+      }
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(
-          'Notes',
-          style: TextStyle(fontWeight: FontWeight.bold),
+        title: const Text(
+          'Plan Your Tasks',
+          style: TextStyle(fontWeight: FontWeight.bold, fontFamily: 'Poppins'),
         ),
         centerTitle: true,
         flexibleSpace: Container(
-          decoration: BoxDecoration(
+          decoration: const BoxDecoration(
             gradient: LinearGradient(
-              colors: [Colors.purple, Colors.blue],
+              colors: [
+                Color.fromARGB(255, 223, 43, 133),
+                Color.fromARGB(255, 0, 0, 0)
+              ],
               begin: Alignment.topLeft,
               end: Alignment.bottomRight,
             ),
@@ -124,14 +249,14 @@ class _ToDoListScreenState extends State<ToDoListScreen> {
               decoration: InputDecoration(
                 hintText: 'Search tasks...',
                 border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(20),
+                  borderRadius: BorderRadius.circular(30),
                 ),
                 filled: true,
-                fillColor: Colors.grey[200],
-                prefixIcon: Icon(Icons.search, color: Colors.purple),
+                fillColor: Colors.pink[50],
+                prefixIcon: const Icon(Icons.search, color: Colors.pink),
                 focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(20),
-                  borderSide: BorderSide(color: Colors.purple, width: 2),
+                  borderRadius: BorderRadius.circular(30),
+                  borderSide: const BorderSide(color: Colors.pink, width: 2),
                 ),
               ),
             ),
@@ -142,29 +267,41 @@ class _ToDoListScreenState extends State<ToDoListScreen> {
               itemBuilder: (context, index) {
                 final todo = filteredList[index];
                 return Card(
-                  margin: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  margin:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                   elevation: 5,
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(15),
                   ),
                   child: ListTile(
-                    contentPadding:
-                        EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                    contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 10),
                     title: Text(
                       todo.title,
                       style: TextStyle(
                         fontSize: 18,
                         fontWeight: FontWeight.bold,
+                        color: Colors.pink,
                         decoration: todo.isCompleted
                             ? TextDecoration.lineThrough
                             : TextDecoration.none,
                       ),
                     ),
+                    subtitle: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Category: ${todo.category}'),
+                        if (todo.reminderTime != null)
+                          Text(
+                            'Reminder: ${todo.reminderTime!.toLocal().toString()}',
+                          ),
+                      ],
+                    ),
                     trailing: Wrap(
                       spacing: 12,
                       children: [
                         IconButton(
-                          icon: Icon(Icons.edit, color: Colors.blueAccent),
+                          icon: const Icon(Icons.edit, color: Colors.pink),
                           onPressed: () {
                             editController.text = todo.title;
                             showDialog(
@@ -174,45 +311,87 @@ class _ToDoListScreenState extends State<ToDoListScreen> {
                                   shape: RoundedRectangleBorder(
                                     borderRadius: BorderRadius.circular(20),
                                   ),
-                                  backgroundColor: Colors.purple[50],
-                                  title: Text(
+                                  backgroundColor: Colors.pink[50],
+                                  title: const Text(
                                     'Edit Task',
                                     style: TextStyle(
-                                      color: Colors.purple,
+                                      color: Colors.pink,
                                       fontWeight: FontWeight.bold,
                                     ),
                                   ),
-                                  content: TextField(
-                                    controller: editController,
-                                    decoration: InputDecoration(
-                                      hintText: 'Edit task title...',
-                                      border: OutlineInputBorder(
-                                        borderRadius:
-                                            BorderRadius.circular(20),
+                                  content: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      TextField(
+                                        controller: editController,
+                                        decoration: InputDecoration(
+                                          hintText: 'Edit task title...',
+                                          border: OutlineInputBorder(
+                                            borderRadius:
+                                                BorderRadius.circular(20),
+                                          ),
+                                        ),
                                       ),
-                                    ),
+                                      DropdownButton<String>(
+                                        value: todo.category,
+                                        onChanged: (newCategory) {
+                                          setState(() {
+                                            todo.category = newCategory!;
+                                          });
+                                        },
+                                        items: [
+                                          'Work',
+                                          'Personal',
+                                          'Health',
+                                          'Study'
+                                        ].map<DropdownMenuItem<String>>(
+                                          (String value) {
+                                            return DropdownMenuItem<String>(
+                                              value: value,
+                                              child: Text(value),
+                                            );
+                                          },
+                                        ).toList(),
+                                      ),
+                                      GestureDetector(
+                                        onTap: () async {
+                                          await selectReminderTime(
+                                              context); // Use the same reminder time selection
+                                        },
+                                        child: Container(
+                                          decoration: BoxDecoration(
+                                            border:
+                                                Border.all(color: Colors.pink),
+                                            borderRadius:
+                                                BorderRadius.circular(8),
+                                          ),
+                                          padding: const EdgeInsets.all(12),
+                                          child: Text(
+                                            todo.reminderTime == null
+                                                ? 'Select Reminder Time'
+                                                : 'Reminder: ${todo.reminderTime!.toLocal().toString()}',
+                                            style: const TextStyle(
+                                                color: Colors.pink),
+                                          ),
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                   actions: [
                                     TextButton(
                                       onPressed: () {
-                                        Navigator.of(context).pop();
+                                        todo.title = editController.text;
+                                        todo.reminderTime =
+                                            reminderTime; // Update reminder time
+                                        editToDoInFirestore(todo);
+                                        Navigator.pop(context);
                                       },
-                                      child: Text(
-                                        'Cancel',
+                                      child: const Text(
+                                        'Save',
                                         style: TextStyle(
-                                            color: Colors.redAccent),
-                                      ),
-                                    ),
-                                    ElevatedButton(
-                                      onPressed: () {
-                                        if (editController.text.isNotEmpty) {
-                                          editToDo(todo);
-                                          Navigator.of(context).pop();
-                                        }
-                                      },
-                                      child: Text('Save'),
-                                      style: ElevatedButton.styleFrom(
-                                        backgroundColor: Colors.black,
+                                          fontWeight: FontWeight.bold,
+                                          color: Colors.pink,
+                                        ),
                                       ),
                                     ),
                                   ],
@@ -221,14 +400,22 @@ class _ToDoListScreenState extends State<ToDoListScreen> {
                             );
                           },
                         ),
-                        Checkbox(
-                          value: todo.isCompleted,
-                          onChanged: (value) =>
-                              toggleTaskCompletion(todo.id),
+                        IconButton(
+                          icon: const Icon(Icons.delete, color: Colors.red),
+                          onPressed: () {
+                            deleteToDoInFirestore(todo.id);
+                          },
                         ),
                         IconButton(
-                          icon: Icon(Icons.delete, color: Colors.redAccent),
-                          onPressed: () => deleteToDo(todo.id),
+                          icon: Icon(
+                            todo.isCompleted
+                                ? Icons.check_box
+                                : Icons.check_box_outline_blank,
+                            color: Colors.pink,
+                          ),
+                          onPressed: () {
+                            toggleTaskCompletion(todo.id);
+                          },
                         ),
                       ],
                     ),
@@ -237,64 +424,102 @@ class _ToDoListScreenState extends State<ToDoListScreen> {
               },
             ),
           ),
-        ],
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () {
-          showDialog(
-            context: context,
-            builder: (context) {
-              return AlertDialog(
+          Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: ElevatedButton(
+              onPressed: () async {
+                final result = await showDialog<DateTime>(
+                  context: context,
+                  builder: (context) {
+                    return AlertDialog(
+                      title: const Text('Add New Task'),
+                      content: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          TextField(
+                            controller: addController,
+                            decoration: const InputDecoration(
+                              labelText: 'Task Title',
+                            ),
+                          ),
+                          DropdownButton<String>(
+                            value: selectedCategory,
+                            onChanged: (newCategory) {
+                              setState(() {
+                                selectedCategory = newCategory!;
+                              });
+                            },
+                            items: ['Work', 'Personal', 'Health', 'Study']
+                                .map<DropdownMenuItem<String>>((String value) {
+                              return DropdownMenuItem<String>(
+                                value: value,
+                                child: Text(value),
+                              );
+                            }).toList(),
+                          ),
+                          GestureDetector(
+                            onTap: () async {
+                              await selectReminderTime(context);
+                            },
+                            child: Container(
+                              decoration: BoxDecoration(
+                                border: Border.all(color: Colors.pink),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              padding: const EdgeInsets.all(12),
+                              child: Text(
+                                reminderTime == null
+                                    ? 'Select Reminder Time'
+                                    : 'Reminder: ${reminderTime!.toLocal().toString()}',
+                                style: const TextStyle(color: Colors.pink),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: () {
+                            Navigator.pop(context);
+                          },
+                          child: const Text(
+                            'Cancel',
+                            style: TextStyle(color: Colors.pink),
+                          ),
+                        ),
+                        TextButton(
+                          onPressed: () {
+                            addToDo(
+                              addController.text,
+                              reminderTime,
+                              selectedCategory,
+                            );
+                            Navigator.pop(context);
+                          },
+                          child: const Text(
+                            'Add',
+                            style: TextStyle(color: Colors.pink),
+                          ),
+                        ),
+                      ],
+                    );
+                  },
+                );
+              },
+              child: const Text('Add Task'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.pink,
                 shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(20),
+                  borderRadius: BorderRadius.circular(30),
                 ),
-                backgroundColor: Colors.purple[50],
-                title: Text(
-                  'Add Task',
-                  style: TextStyle(
-                    color: Colors.purple,
-                    fontWeight: FontWeight.bold,
-                  ),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 30,
+                  vertical: 12,
                 ),
-                content: TextField(
-                  controller: addController,
-                  decoration: InputDecoration(
-                    hintText: 'Task title...',
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                  ),
-                ),
-                actions: [
-                  TextButton(
-                    onPressed: () {
-                      Navigator.of(context).pop();
-                    },
-                    child: Text(
-                      'Cancel',
-                      style: TextStyle(color: Colors.redAccent),
-                    ),
-                  ),
-                  ElevatedButton(
-                    onPressed: () {
-                      if (addController.text.isNotEmpty) {
-                        addToDo(addController.text);
-                        addController.clear();
-                        Navigator.of(context).pop();
-                      }
-                    },
-                    child: Text('Add'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.black,
-                    ),
-                  ),
-                ],
-              );
-            },
-          );
-        },
-        backgroundColor: Colors.purple,
-        child: Icon(Icons.edit), // Changed from Icons.add to Icons.edit
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
